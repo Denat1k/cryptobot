@@ -5,6 +5,10 @@ import hmac
 import hashlib
 import os
 import logging
+import re
+import json
+import random
+import string
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -44,6 +48,68 @@ async def rapira(session):
     return ("Rapira", None, "пара не найдена")
 
 
+def _sockjs_session():
+    """Случайный 8-символьный session-id для SockJS."""
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
+
+async def investing(session):
+    """
+    Investing.com — стрим по SockJS WebSocket. Подключаемся, подписываемся
+    на pair id (USDT/RUB = 1208082), ждём первый дата-кадр и закрываем сокет.
+    """
+    server = random.randint(100, 999)
+    sess = _sockjs_session()
+    url = f"wss://streaming.forexpros.com/echo/{server}/{sess}/websocket"
+    headers = {
+        "Origin": "https://www.investing.com",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    try:
+        async with session.ws_connect(url, headers=headers, timeout=5,
+                                       heartbeat=20) as ws:
+            # подписка на пару (Investing pid 1208082 = USDT/RUB)
+            sub = json.dumps([json.dumps({
+                "_event": "bulk-subscribe",
+                "tzID": "8",
+                "message": "pid-1208082:",
+            })])
+            await ws.send_str(sub)
+
+            # ждём данные не дольше 5 сек
+            deadline = time.time() + 5
+            async for msg in ws:
+                if time.time() > deadline:
+                    break
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                raw = msg.data
+                # SockJS обёртки: 'o' = open, 'h' = heartbeat, 'a[...]' = data
+                if not raw.startswith("a"):
+                    continue
+                # внутри a[...] лежит массив строк, каждая — JSON
+                try:
+                    frames = json.loads(raw[1:])  # массив строк
+                except json.JSONDecodeError:
+                    continue
+                for frame in frames:
+                    # frame: '{"message":"pid-1208082::{\"pid\":...,\"last_numeric\":74.12,...}"}'
+                    try:
+                        outer = json.loads(frame)
+                        m = outer.get("message", "")
+                        # внутренний JSON после "pid-1208082::"
+                        inner_json = m.split("::", 1)[-1]
+                        inner = json.loads(inner_json)
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    price = inner.get("last_numeric")
+                    if price:
+                        await ws.close()
+                        return ("Investing", float(price), None)
+            return ("Investing", None, "не получили last_numeric за 5с")
+    except Exception as e:
+        return ("Investing", None, str(e))
 async def exmo(session):
     data = await fetch(session, "https://api.exmo.me/v1.1/ticker")
     if "_error" in data:
@@ -171,7 +237,8 @@ async def get_all_rates():
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as s:
         results = await asyncio.gather(
             rapira(s), exmo(s), yobit(s), free2ex(s),
-            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s)
+            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s),    investing(s)
+
         )
     dt = (time.perf_counter() - t0) * 1000
     return results, dt
