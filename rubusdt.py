@@ -244,14 +244,21 @@ async def get_all_rates():
     return results, dt
 
 
+def _esc(s: str) -> str:
+    return (str(s)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
 def format_rates_message(results, dt):
-    """Форматирует результаты в красивое Markdown-сообщение с выделением min/max и добавляет дату/время."""
+    """Форматирует результаты в HTML-сообщение с выделением min/max и добавляет дату/время."""
     import datetime
 
     now = datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')
     lines = [
-        f"💱 *Курс {PAIR_DISPLAY}*  _(собрано за {dt:.0f} мс)_",
-        f"_Данные на_: `{now}`",
+        f"💱 <b>Курс {_esc(PAIR_DISPLAY)}</b>  <i>(собрано за {dt:.0f} мс)</i>",
+        f"<i>Данные на</i>: <code>{now}</code>",
         ""
     ]
     prices = []
@@ -262,46 +269,40 @@ def format_rates_message(results, dt):
             prices.append((name, price))
         else:
             errors.append((name, err))
-    
-    # Определяем min/max среди биржевых (не *), если есть
+
     market_prices = [(n, p) for n, p in prices if not n.endswith("*")]
     min_val = min(market_prices, key=lambda x: x[1])[1] if market_prices else None
     max_val = max(market_prices, key=lambda x: x[1])[1] if market_prices else None
 
     for name, price in prices:
-        line = f"`{name:<11}` *{price:>9.4f} ₽*"
-        # выделяем только для биржевых
+        name_html = _esc(f"{name:<11}")
+        price_html = f"{price:>9.4f} ₽"
+        marker = ""
         if not name.endswith("*") and min_val is not None and max_val is not None:
             if abs(price - min_val) < 1e-4:
-                line += " 🟢"  # либо цветом, либо эмодзи: зелёный круг
-                # line = f"<b><code>{name:<11}</code></b> <b><span style='color:green'>{price:>9.4f} ₽</span></b>"
-                line = f"<code>{name:<11}</code> <b><span style='color:#008000'>{price:>9.4f} ₽</span></b> 🟢"
+                marker = " 🟢"
             elif abs(price - max_val) < 1e-4:
-                line += " 🔴"
-                line = f"<code>{name:<11}</code> <b><span style='color:#FF0000'>{price:>9.4f} ₽</span></b> 🔴"
-            else:
-                line = f"<code>{name:<11}</code> <b>{price:>9.4f} ₽</b>"
-        else:
-            line = f"<code>{name:<11}</code> <b>{price:>9.4f} ₽</b>"
-
-        lines.append(line)
+                marker = " 🔴"
+        lines.append(f"<code>{name_html}</code> <b>{price_html}</b>{marker}")
 
     if prices:
         if market_prices:
-            avg = sum([p for n, p in market_prices]) / len(market_prices)
-            spread = max_val - min_val if (min_val is not None and max_val is not None) else 0
+            avg = sum(p for _, p in market_prices) / len(market_prices)
+            spread = (max_val - min_val) if (min_val is not None and max_val is not None) else 0
             lines.append("")
-            lines.append(f"📊 *Биржевая средняя:* `{avg:.4f} ₽`")
-            lines.append(f"📈 *Спред:* `{spread:.4f} ₽`  _(min `{min_val:.4f}` / max `{max_val:.4f}`)_")
-        lines.append("\n_\\* — обменник/брокер, не биржа_")
+            lines.append(f"📊 <b>Биржевая средняя:</b> <code>{avg:.4f} ₽</code>")
+            lines.append(
+                f"📈 <b>Спред:</b> <code>{spread:.4f} ₽</code>  "
+                f"<i>(min <code>{min_val:.4f}</code> / max <code>{max_val:.4f}</code>)</i>"
+            )
+        lines.append("\n<i>* — обменник/брокер, не биржа</i>")
 
     if errors:
-        lines.append("\n⚠️ _Недоступны:_")
+        lines.append("\n⚠️ <i>Недоступны:</i>")
         for name, err in errors:
-            short_err = (err or "")[:50]
-            lines.append(f"  • `{name}` — {short_err}")
+            short_err = _esc((err or "")[:50])
+            lines.append(f"  • <code>{_esc(name)}</code> — {short_err}")
 
-    # Включаем режим HTML-форматирования для Telegram
     return "\n".join(lines)
 
 
@@ -336,7 +337,7 @@ async def cmd_rate(message: types.Message):
     try:
         results, dt = await get_all_rates()
         text = format_rates_message(results, dt)
-        await status.edit_text(text)
+        await status.edit_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         log.exception("rate failed")
         await status.edit_text(f"❌ Ошибка: `{e}`")
