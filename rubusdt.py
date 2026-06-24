@@ -194,13 +194,20 @@ async def tokenspot(session):
     data = await fetch(session, url, headers={"Accept": "application/json"})
     if "_error" in data:
         return ("TokenSpot", None, data["_error"])
-    bids = data.get("bids") or data.get("b") or []
-    asks = data.get("asks") or data.get("a") or []
-    try:
-        best_bid = float(bids[0][0]) if bids else None
-        best_ask = float(asks[0][0]) if asks else None
-    except (ValueError, TypeError, IndexError):
-        best_bid = best_ask = None
+    def _best(level):
+        if not level:
+            return None
+        item = level[0]
+        if isinstance(item, dict):
+            raw = item.get("price") or item.get("p")
+        else:
+            raw = item[0]
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return None
+    best_bid = _best(data.get("bids") or data.get("b") or [])
+    best_ask = _best(data.get("asks") or data.get("a") or [])
     if best_bid and best_ask:
         return ("TokenSpot", (best_bid + best_ask) / 2, None)
     if best_bid or best_ask:
