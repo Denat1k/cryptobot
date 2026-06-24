@@ -343,7 +343,7 @@ def format_rates_message(results, dt):
     msk = datetime.timezone(datetime.timedelta(hours=3))
     now = datetime.datetime.now(msk).strftime('%d.%m.%Y %H:%M:%S')
     lines = [
-        f"💱 <b>Курс {_esc(PAIR_DISPLAY)}</b>  <i>(собрано за {dt:.0f} мс)</i>",
+        f"💱 <b>Курс {_esc(PAIR_DISPLAY)}</b>",
         f"<i>Данные на</i>: <code>{now} МСК</code>",
         ""
     ]
