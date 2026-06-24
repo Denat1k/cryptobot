@@ -363,12 +363,13 @@ def format_rates_message(results, dt):
     for name, price in prices:
         name_html = _esc(f"{name:<11}")
         price_html = f"{price:>9.4f} ₽"
+        mark = ""
         if not name.endswith("*") and min_val is not None and max_val is not None:
             if abs(price - min_val) < 1e-4:
-                price_html = f"<span style='color:green'>{price_html}</span>"
+                mark = "🟢 "
             elif abs(price - max_val) < 1e-4:
-                price_html = f"<span style='color:red'>{price_html}</span>"
-        lines.append(f"<code>{name_html}</code> <b>{price_html}</b>")
+                mark = "🔴 "
+        lines.append(f"<code>{name_html}</code> {mark}<b>{price_html}</b>")
 
     if prices:
         if market_prices:
