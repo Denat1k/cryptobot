@@ -245,26 +245,54 @@ async def get_all_rates():
 
 
 def format_rates_message(results, dt):
-    """Форматирует результаты в красивое Markdown-сообщение."""
-    lines = [f"💱 *Курс {PAIR_DISPLAY}*  _(собрано за {dt:.0f} мс)_", ""]
+    """Форматирует результаты в красивое Markdown-сообщение с выделением min/max и добавляет дату/время."""
+    import datetime
+
+    now = datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+    lines = [
+        f"💱 *Курс {PAIR_DISPLAY}*  _(собрано за {dt:.0f} мс)_",
+        f"_Данные на_: `{now}`",
+        ""
+    ]
     prices = []
     errors = []
 
     for name, price, err in results:
         if price:
-            lines.append(f"`{name:<11}` *{price:>9.4f} ₽*")
             prices.append((name, price))
         else:
             errors.append((name, err))
+    
+    # Определяем min/max среди биржевых (не *), если есть
+    market_prices = [(n, p) for n, p in prices if not n.endswith("*")]
+    min_val = min(market_prices, key=lambda x: x[1])[1] if market_prices else None
+    max_val = max(market_prices, key=lambda x: x[1])[1] if market_prices else None
+
+    for name, price in prices:
+        line = f"`{name:<11}` *{price:>9.4f} ₽*"
+        # выделяем только для биржевых
+        if not name.endswith("*") and min_val is not None and max_val is not None:
+            if abs(price - min_val) < 1e-4:
+                line += " 🟢"  # либо цветом, либо эмодзи: зелёный круг
+                # line = f"<b><code>{name:<11}</code></b> <b><span style='color:green'>{price:>9.4f} ₽</span></b>"
+                line = f"<code>{name:<11}</code> <b><span style='color:#008000'>{price:>9.4f} ₽</span></b> 🟢"
+            elif abs(price - max_val) < 1e-4:
+                line += " 🔴"
+                line = f"<code>{name:<11}</code> <b><span style='color:#FF0000'>{price:>9.4f} ₽</span></b> 🔴"
+            else:
+                line = f"<code>{name:<11}</code> <b>{price:>9.4f} ₽</b>"
+        else:
+            line = f"<code>{name:<11}</code> <b>{price:>9.4f} ₽</b>"
+
+        lines.append(line)
 
     if prices:
-        market = [p for n, p in prices if not n.endswith("*")]
-        lines.append("")
-        if market:
-            avg = sum(market) / len(market)
-            spread = max(market) - min(market)
+        if market_prices:
+            avg = sum([p for n, p in market_prices]) / len(market_prices)
+            spread = max_val - min_val if (min_val is not None and max_val is not None) else 0
+            lines.append("")
             lines.append(f"📊 *Биржевая средняя:* `{avg:.4f} ₽`")
-            lines.append(f"📈 *Спред:* `{spread:.4f} ₽`  _(min `{min(market):.4f}` / max `{max(market):.4f}`)_")
+            lines.append(f"📈 *Спред:* `{spread:.4f} ₽`  _(min `{min_val:.4f}` / max `{max_val:.4f}`)_")
         lines.append("\n_\\* — обменник/брокер, не биржа_")
 
     if errors:
@@ -273,6 +301,7 @@ def format_rates_message(results, dt):
             short_err = (err or "")[:50]
             lines.append(f"  • `{name}` — {short_err}")
 
+    # Включаем режим HTML-форматирования для Telegram
     return "\n".join(lines)
 
 
