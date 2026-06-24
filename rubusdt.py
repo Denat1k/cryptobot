@@ -1,0 +1,267 @@
+﻿import asyncio
+import aiohttp
+import time
+import hmac
+import hashlib
+import os
+import logging
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, CommandStart
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+# ====== Конфигурация ======
+BOT_TOKEN     = "8906311793:AAFyen6qpsoKAKbtFTxmB47JxBSz8rMwCSY"
+TS_API_KEY    = os.getenv("TS_API_KEY", "")
+TS_API_SECRET = os.getenv("TS_API_SECRET", "")
+TS_RECV_WINDOW = "50000"
+
+PAIR_DISPLAY = "USDT/RUB"
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("ratebot")
+
+
+# ====== HTTP helper ======
+async def fetch(session, url, method="GET", headers=None, json_body=None, timeout=5):
+    try:
+        async with session.request(method, url, headers=headers, json=json_body,
+                                   timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            return await r.json(content_type=None)
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+# ====== Биржи ======
+async def rapira(session):
+    data = await fetch(session, "https://api.rapira.net/open/market/rates")
+    if "_error" in data:
+        return ("Rapira", None, data["_error"])
+    for item in data.get("data", []):
+        if item.get("symbol") == "USDT/RUB":
+            return ("Rapira", float(item.get("close") or item.get("lastPrice")), None)
+    return ("Rapira", None, "пара не найдена")
+
+
+async def exmo(session):
+    data = await fetch(session, "https://api.exmo.me/v1.1/ticker")
+    if "_error" in data:
+        return ("EXMO.me", None, data["_error"])
+    t = data.get("USDT_RUB")
+    if t:
+        return ("EXMO.me", float(t["last_trade"]), None)
+    return ("EXMO.me", None, "пара не найдена")
+
+
+async def yobit(session):
+    data = await fetch(session, "https://yobit.net/api/3/ticker/usdt_rur")
+    if "_error" in data:
+        return ("YoBit", None, data["_error"])
+    t = data.get("usdt_rur")
+    if t:
+        return ("YoBit", float(t["last"]), None)
+    return ("YoBit", None, "пара не найдена")
+
+
+async def free2ex(session):
+    url = "https://cryptottlivewebapi.free2ex.net:8443/api/v2/public/ticker/USDTRUB"
+    data = await fetch(session, url)
+    if "_error" in data:
+        return ("Free2ex", None, data["_error"])
+    if isinstance(data, list) and data:
+        data = data[0]
+    price = data.get("LastBuyPrice") or data.get("LastSellPrice") \
+            or data.get("BestBid") or data.get("BestAsk")
+    if price:
+        return ("Free2ex", float(price), None)
+    return ("Free2ex", None, f"нет цены: {str(data)[:80]}")
+
+
+async def tokenspot(session):
+    if not TS_API_KEY or not TS_API_SECRET:
+        return ("TokenSpot", None, "нет API-ключа")
+    endpoint = "/api/v1/spot/ticker"
+    query = "symbol=usdtrub"
+    ts = str(int(time.time() * 1000))
+    string_to_sign = f"{ts}{TS_API_KEY}{TS_RECV_WINDOW}{query}"
+    sign = hmac.new(TS_API_SECRET.encode(), string_to_sign.encode(),
+                    hashlib.sha256).hexdigest()
+    headers = {
+        "TS-API-API-KEY": TS_API_KEY,
+        "TS-API-TIMESTAMP": ts,
+        "TS-API-RECV-WINDOW": TS_RECV_WINDOW,
+        "TS-API-SIGN": sign,
+        "Accept": "application/json",
+    }
+    url = f"https://api.tokenspot.com{endpoint}?{query}"
+    data = await fetch(session, url, headers=headers)
+    if "_error" in data:
+        return ("TokenSpot", None, data["_error"])
+    price = data.get("last") or data.get("lastPrice") or data.get("close")
+    if price:
+        return ("TokenSpot", float(price), None)
+    return ("TokenSpot", None, f"нет цены: {str(data)[:80]}")
+
+
+async def whitebird(session):
+    url = "https://admin-service.whitebird.io/api/v1/exchange/calculation"
+    amount_rub = 80000
+    body = {
+        "currencyPair": {"fromCurrency": "RUB", "toCurrency": "USDT_TRC"},
+        "calculation": {"inputAsset": amount_rub},
+        "paymentInfo": {"paymentToken": ""},
+        "providerType": "ASSIST",
+    }
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://sdk.whitebird.io",
+        "Referer": "https://sdk.whitebird.io/",
+    }
+    data = await fetch(session, url, method="POST", headers=headers, json_body=body)
+    if "_error" in data:
+        return ("Whitebird*", None, data["_error"])
+    out = (data.get("calculation", {}).get("outputAsset")
+           or data.get("outputAsset")
+           or data.get("toAmount")
+           or data.get("result", {}).get("outputAsset"))
+    rate = (data.get("exchangeRate")
+            or data.get("rate")
+            or data.get("calculation", {}).get("exchangeRate"))
+    if out:
+        return ("Whitebird*", amount_rub / float(out), None)
+    if rate:
+        return ("Whitebird*", float(rate), None)
+    return ("Whitebird*", None, f"структура: {str(data)[:120]}")
+
+
+async def cifra_broker(session):
+    url = "https://api.cifra-broker.by/api/site/ticker-calculator?key=1"
+    raw = await fetch(session, url)
+    if "_error" in raw:
+        return ("Cifra*", None, raw["_error"])
+    if not raw.get("success"):
+        return ("Cifra*", None, f"success=false: {raw.get('message')}")
+    data = raw.get("data") or {}
+    real = data.get("currenciesReal", [])
+    rate_rur = next((c["rate"]["value"] for c in real
+                     if c.get("code") in ("RUR", "RUB") and c.get("rate")), None)
+    rate_usd = next((c["rate"]["value"] for c in real
+                     if c.get("code") == "USD" and c.get("rate")), None)
+    if not rate_rur or not rate_usd:
+        return ("Cifra*", None, f"нет RUR/USD (real={len(real)})")
+    return ("Cifra*", float(rate_rur) / float(rate_usd), None)
+
+
+async def bynex(session):
+    url = "https://bynex.io/trading/ru/api/rate/USDT-RUB"
+    data = await fetch(session, url)
+    if "_error" in data:
+        return ("Bynex", None, data["_error"])
+    price = data.get("last") or data.get("price")
+    if price:
+        return ("Bynex", float(price), None)
+    return ("Bynex", None, f"нет цены: {str(data)[:80]}")
+
+
+# ====== Сбор всех курсов ======
+async def get_all_rates():
+    t0 = time.perf_counter()
+    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as s:
+        results = await asyncio.gather(
+            rapira(s), exmo(s), yobit(s), free2ex(s),
+            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s)
+        )
+    dt = (time.perf_counter() - t0) * 1000
+    return results, dt
+
+
+def format_rates_message(results, dt):
+    """Форматирует результаты в красивое Markdown-сообщение."""
+    lines = [f"💱 *Курс {PAIR_DISPLAY}*  _(собрано за {dt:.0f} мс)_", ""]
+    prices = []
+    errors = []
+
+    for name, price, err in results:
+        if price:
+            lines.append(f"`{name:<11}` *{price:>9.4f} ₽*")
+            prices.append((name, price))
+        else:
+            errors.append((name, err))
+
+    if prices:
+        market = [p for n, p in prices if not n.endswith("*")]
+        lines.append("")
+        if market:
+            avg = sum(market) / len(market)
+            spread = max(market) - min(market)
+            lines.append(f"📊 *Биржевая средняя:* `{avg:.4f} ₽`")
+            lines.append(f"📈 *Спред:* `{spread:.4f} ₽`  _(min `{min(market):.4f}` / max `{max(market):.4f}`)_")
+        lines.append("\n_\\* — обменник/брокер, не биржа_")
+
+    if errors:
+        lines.append("\n⚠️ _Недоступны:_")
+        for name, err in errors:
+            short_err = (err or "")[:50]
+            lines.append(f"  • `{name}` — {short_err}")
+
+    return "\n".join(lines)
+
+
+# ====== Хэндлеры бота ======
+dp = Dispatcher()
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 Привет! Я слежу за курсом *USDT/RUB* по биржам СНГ.\n\n"
+        "Команды:\n"
+        "/rate — получить актуальный курс\n"
+        "/help — справка"
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "*Поддерживаемые площадки:*\n"
+        "🟢 *Биржи:* Rapira, EXMO\\.me, YoBit, Free2ex, TokenSpot, Bynex\n"
+        "🟡 *Обменник/брокер:* Whitebird, Cifra\n\n"
+        "Используй /rate чтобы увидеть курс по всем сразу\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+@dp.message(Command("rate"))
+async def cmd_rate(message: types.Message):
+    status = await message.answer("⏳ Опрашиваю биржи\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        results, dt = await get_all_rates()
+        text = format_rates_message(results, dt)
+        await status.edit_text(text)
+    except Exception as e:
+        log.exception("rate failed")
+        await status.edit_text(f"❌ Ошибка: `{e}`")
+
+
+# ====== Запуск ======
+async def main():
+    if BOT_TOKEN.startswith("ВСТАВЬ"):
+        raise RuntimeError("Установи переменную окружения BOT_TOKEN")
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    )
+    # ставим команды в меню Telegram
+    await bot.set_my_commands([
+        types.BotCommand(command="rate", description="Курс USDT/RUB"),
+        types.BotCommand(command="help", description="Справка"),
+    ])
+    log.info("Bot started")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
