@@ -190,28 +190,21 @@ async def free2ex(session):
 
 
 async def tokenspot(session):
-    if not TS_API_KEY or not TS_API_SECRET:
-        return ("TokenSpot", None, "нет API-ключа")
-    endpoint = "/api/v1/spot/ticker"
-    query = "symbol=usdtrub"
-    ts = str(int(time.time() * 1000))
-    string_to_sign = f"{ts}{TS_API_KEY}{TS_RECV_WINDOW}{query}"
-    sign = hmac.new(TS_API_SECRET.encode(), string_to_sign.encode(),
-                    hashlib.sha256).hexdigest()
-    headers = {
-        "TS-API-API-KEY": TS_API_KEY,
-        "TS-API-TIMESTAMP": ts,
-        "TS-API-RECV-WINDOW": TS_RECV_WINDOW,
-        "TS-API-SIGN": sign,
-        "Accept": "application/json",
-    }
-    url = f"https://api.tokenspot.com{endpoint}?{query}"
-    data = await fetch(session, url, headers=headers)
+    url = "https://api.tokenspot.com/api/v1/spot/depth?symbol=usdtrub"
+    data = await fetch(session, url, headers={"Accept": "application/json"})
     if "_error" in data:
         return ("TokenSpot", None, data["_error"])
-    price = data.get("last") or data.get("lastPrice") or data.get("close")
-    if price:
-        return ("TokenSpot", float(price), None)
+    bids = data.get("bids") or data.get("b") or []
+    asks = data.get("asks") or data.get("a") or []
+    try:
+        best_bid = float(bids[0][0]) if bids else None
+        best_ask = float(asks[0][0]) if asks else None
+    except (ValueError, TypeError, IndexError):
+        best_bid = best_ask = None
+    if best_bid and best_ask:
+        return ("TokenSpot", (best_bid + best_ask) / 2, None)
+    if best_bid or best_ask:
+        return ("TokenSpot", best_bid or best_ask, None)
     return ("TokenSpot", None, f"нет цены: {str(data)[:80]}")
 
 
