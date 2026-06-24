@@ -262,49 +262,36 @@ async def cifra_broker(session):
 async def abcex(session):
     url = "https://gateway.abcex.io/api/v2/exchange/public/trade/spot/rates"
     headers = {
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/xml, text/xml, */*",
         "Origin": "https://abcex.io",
         "Referer": "https://abcex.io/",
     }
-    data = await fetch(session, url, headers=headers)
-    if isinstance(data, dict) and "_error" in data:
-        return ("ABCEX", None, data["_error"])
+    # Получаем XML, парсим вручную
+    try:
+        async with session.get(url, headers=headers) as r:
+            xml = await r.text()
+    except Exception as e:
+        return ("ABCEX", None, str(e))
 
-    # вытаскиваем список тикеров из возможных оболочек
-    items = None
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for key in ("data", "rates", "result", "items", "tickers"):
-            v = data.get(key)
-            if isinstance(v, list):
-                items = v
-                break
-            if isinstance(v, dict):
-                inner = v.get("rates") or v.get("items") or v.get("list")
-                if isinstance(inner, list):
-                    items = inner
-                    break
-
-    if not items:
-        return ("ABCEX", None, f"структура: {str(data)[:120]}")
-
-    def norm(s):
-        return str(s or "").upper().replace("_", "").replace("/", "").replace("-", "")
-
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        sym = norm(it.get("symbol") or it.get("pair") or it.get("market")
-                   or it.get("instrument") or it.get("name"))
-        if sym != "USDTRUB":
-            continue
-        price = (it.get("last") or it.get("lastPrice") or it.get("close")
-                 or it.get("price") or it.get("rate"))
-        if price:
-            return ("ABCEX", float(price), None)
-        return ("ABCEX", None, f"нет цены в тикере: {str(it)[:80]}")
-    return ("ABCEX", None, "пара USDT/RUB не найдена")
+    # Примитивный парсер: ищем блок <item> с нужной парой
+    # <from>USDT</from> <to>RUB</to> <in>1</in> <out>78.15</out>
+    try:
+        pattern = re.compile(
+            r"<item>\s*"
+            r"<from>\s*USDT\s*</from>\s*"
+            r"<to>\s*RUB\s*</to>\s*"
+            r"<in>\s*1\s*</in>\s*"
+            r"<out>\s*([0-9\.]+)\s*</out>",
+            re.IGNORECASE | re.DOTALL
+        )
+        match = pattern.search(xml)
+        if match:
+            price = float(match.group(1))
+            return ("ABCEX", price, None)
+        else:
+            return ("ABCEX", None, f"пара USDT→RUB не найдена в XML: {xml[:120]}")
+    except Exception as e:
+        return ("ABCEX", None, f"ошибка парсинга XML: {e}")
 
 
 async def bynex(session):
