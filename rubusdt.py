@@ -16,7 +16,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # ====== Конфигурация ======
-BOT_TOKEN     = "8906311793:AAFyen6qpsoKAKbtFTxmB47JxBSz8rMwCSY"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TS_API_KEY    = os.getenv("TS_API_KEY", "")
 TS_API_SECRET = os.getenv("TS_API_SECRET", "")
 TS_RECV_WINDOW = "50000"
@@ -168,6 +168,12 @@ async def yobit(session):
         return ("YoBit", float(t["last"]), None)
     return ("YoBit", None, "пара не найдена")
 
+async def bitcode(session):
+    name, price, err = await rapira(session)
+    if err or price is None:
+        return ("BitCode", None, f"ошибка Rapira: {err}")
+    price_with_markup = round(price * 1.02, 6)
+    return ("BitCode", price_with_markup, None)
 
 async def free2ex(session):
     url = "https://cryptottlivewebapi.free2ex.net:8443/api/v2/public/ticker/USDTRUB"
@@ -311,12 +317,16 @@ async def get_all_rates():
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as s:
         results = await asyncio.gather(
             rapira(s), exmo(s), yobit(s), free2ex(s),
-            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s),    investing(s),
-            abcex(s),
-
+            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s), investing(s),
+            abcex(s),bitcode(s),
         )
+    # Сортируем от самого низкого к самому высокому по цене (где цена есть)
+    results_sorted = sorted(
+        results, 
+        key=lambda x: (float('inf') if x[1] is None else x[1])
+    )
     dt = (time.perf_counter() - t0) * 1000
-    return results, dt
+    return results_sorted, dt
 
 
 def _esc(s: str) -> str:
@@ -353,13 +363,12 @@ def format_rates_message(results, dt):
     for name, price in prices:
         name_html = _esc(f"{name:<11}")
         price_html = f"{price:>9.4f} ₽"
-        marker = ""
         if not name.endswith("*") and min_val is not None and max_val is not None:
             if abs(price - min_val) < 1e-4:
-                marker = " 🟢"
+                price_html = f"<span style='color:green'>{price_html}</span>"
             elif abs(price - max_val) < 1e-4:
-                marker = " 🔴"
-        lines.append(f"<code>{name_html}</code> <b>{price_html}</b>{marker}")
+                price_html = f"<span style='color:red'>{price_html}</span>"
+        lines.append(f"<code>{name_html}</code> <b>{price_html}</b>")
 
     if prices:
         if market_prices:
