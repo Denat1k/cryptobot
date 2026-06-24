@@ -53,10 +53,41 @@ def _sockjs_session():
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
 
+async def investing_http(session):
+    """Фолбэк: исторический график по pid=1208082, берём close последней свечи."""
+    url = ("https://api.investing.com/api/financialdata/1208082/historical/chart/"
+           "?interval=PT1M&pointscount=160")
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Origin": "https://www.investing.com",
+        "Referer": "https://www.investing.com/",
+        "domain-id": "www",
+    }
+    data = await fetch(session, url, headers=headers, timeout=8)
+    if isinstance(data, dict) and "_error" in data:
+        return None, data["_error"]
+    candles = data.get("data") if isinstance(data, dict) else None
+    if not candles:
+        return None, f"нет data в ответе: {str(data)[:80]}"
+    last = candles[-1]
+    # формат: [timestamp_ms, open, high, low, close, volume]
+    if not isinstance(last, list) or len(last) < 5:
+        return None, f"плохой формат свечи: {str(last)[:80]}"
+    price = last[4]
+    if not price:
+        return None, "close=0/None"
+    return float(price), None
+
+
 async def investing(session):
     """
     Investing.com — стрим по SockJS WebSocket. Подключаемся, подписываемся
     на pair id (USDT/RUB = 1208082), ждём первый дата-кадр и закрываем сокет.
+    Если за 5с данных нет — фолбэк на historical HTTP API.
     """
     server = random.randint(100, 999)
     sess = _sockjs_session()
@@ -107,9 +138,17 @@ async def investing(session):
                     if price:
                         await ws.close()
                         return ("Investing", float(price), None)
-            return ("Investing", None, "не получили last_numeric за 5с")
+            # WS не отдал — пробуем historical HTTP API
+            price, err = await investing_http(session)
+            if price:
+                return ("Investing", price, None)
+            return ("Investing", None, f"WS таймаут; HTTP: {err}")
     except Exception as e:
-        return ("Investing", None, str(e))
+        # WS вообще не поднялся — сразу фолбэк
+        price, http_err = await investing_http(session)
+        if price:
+            return ("Investing", price, None)
+        return ("Investing", None, f"WS: {e}; HTTP: {http_err}")
 async def exmo(session):
     data = await fetch(session, "https://api.exmo.me/v1.1/ticker")
     if "_error" in data:
@@ -220,6 +259,54 @@ async def cifra_broker(session):
     return ("Cifra*", float(rate_rur) / float(rate_usd), None)
 
 
+async def abcex(session):
+    url = "https://gateway.abcex.io/api/v2/exchange/public/trade/spot/rates"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://abcex.io",
+        "Referer": "https://abcex.io/",
+    }
+    data = await fetch(session, url, headers=headers)
+    if isinstance(data, dict) and "_error" in data:
+        return ("ABCEX", None, data["_error"])
+
+    # вытаскиваем список тикеров из возможных оболочек
+    items = None
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        for key in ("data", "rates", "result", "items", "tickers"):
+            v = data.get(key)
+            if isinstance(v, list):
+                items = v
+                break
+            if isinstance(v, dict):
+                inner = v.get("rates") or v.get("items") or v.get("list")
+                if isinstance(inner, list):
+                    items = inner
+                    break
+
+    if not items:
+        return ("ABCEX", None, f"структура: {str(data)[:120]}")
+
+    def norm(s):
+        return str(s or "").upper().replace("_", "").replace("/", "").replace("-", "")
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        sym = norm(it.get("symbol") or it.get("pair") or it.get("market")
+                   or it.get("instrument") or it.get("name"))
+        if sym != "USDTRUB":
+            continue
+        price = (it.get("last") or it.get("lastPrice") or it.get("close")
+                 or it.get("price") or it.get("rate"))
+        if price:
+            return ("ABCEX", float(price), None)
+        return ("ABCEX", None, f"нет цены в тикере: {str(it)[:80]}")
+    return ("ABCEX", None, "пара USDT/RUB не найдена")
+
+
 async def bynex(session):
     url = "https://bynex.io/trading/ru/api/rate/USDT-RUB"
     data = await fetch(session, url)
@@ -237,7 +324,8 @@ async def get_all_rates():
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as s:
         results = await asyncio.gather(
             rapira(s), exmo(s), yobit(s), free2ex(s),
-            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s),    investing(s)
+            tokenspot(s), whitebird(s), cifra_broker(s), bynex(s),    investing(s),
+            abcex(s),
 
         )
     dt = (time.perf_counter() - t0) * 1000
@@ -255,10 +343,11 @@ def format_rates_message(results, dt):
     """Форматирует результаты в HTML-сообщение с выделением min/max и добавляет дату/время."""
     import datetime
 
-    now = datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+    msk = datetime.timezone(datetime.timedelta(hours=3))
+    now = datetime.datetime.now(msk).strftime('%d.%m.%Y %H:%M:%S')
     lines = [
         f"💱 <b>Курс {_esc(PAIR_DISPLAY)}</b>  <i>(собрано за {dt:.0f} мс)</i>",
-        f"<i>Данные на</i>: <code>{now}</code>",
+        f"<i>Данные на</i>: <code>{now} МСК</code>",
         ""
     ]
     prices = []
@@ -324,7 +413,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "*Поддерживаемые площадки:*\n"
-        "🟢 *Биржи:* Rapira, EXMO\\.me, YoBit, Free2ex, TokenSpot, Bynex\n"
+        "🟢 *Биржи:* Rapira, EXMO\\.me, YoBit, Free2ex, TokenSpot, Bynex, ABCEX\n"
         "🟡 *Обменник/брокер:* Whitebird, Cifra\n\n"
         "Используй /rate чтобы увидеть курс по всем сразу\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
